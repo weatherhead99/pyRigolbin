@@ -23,6 +23,7 @@ class RigolBinaryHeader:
 
     def __init__(self):
         logging.debug(pprint.pprint(self))
+        self._public_props: list[str] = []
 
 def _raw_str_decode(inp: bytes) -> str:
     return inp.rstrip(bytes([0])).decode("UTF-8")
@@ -37,6 +38,7 @@ class RigolBinaryFileHeader(RigolBinaryHeader):
     def __post_init__(self):
         super().__init__()
         self.version = _raw_str_decode(self.versionraw)
+        self._public_props += ["version"]
 
 
 @dcs.dataclass(dcs.LITTLE_ENDIAN)
@@ -50,8 +52,8 @@ class RigolBinaryWaveformHeader(RigolBinaryHeader):
     xdisporigin: dcs.F64
     xincr: dcs.F64
     xorigin: dcs.F64
-    xunits: dcs.U32
-    yunits: dcs.U32
+    xunitsraw: dcs.U32
+    yunitsraw: dcs.U32
     dateraw: Annotated[bytes, 16] #72 chars from here
     timeraw: Annotated[bytes, 16]
     modelraw: Annotated[bytes, 24]
@@ -66,11 +68,13 @@ class RigolBinaryWaveformHeader(RigolBinaryHeader):
         self.dt = datetime.strptime(f"{datestr} {timestr}",
                                     "%Y-%m-%d %H:%M:%S")
 
+        self._public_props += ["dt", "xdisprange", "xdisporigin", "name", "model"]
+
 
 @dcs.dataclass(dcs.LITTLE_ENDIAN)
 class RigolBinaryWaveformDataHeader(RigolBinaryHeader):
     sz: dcs.U32
-    tp: dcs.U16
+    tpraw: dcs.U16
     bpp: dcs.U16
     bufsz: dcs.U64
 
@@ -80,7 +84,7 @@ class RigolBinaryWaveformDataHeader(RigolBinaryHeader):
 
 class RigolBinaryWaveformData:
     @classmethod
-    def read_from_stream(cls, wfdhdr: RigolBinaryWaveformData, **kwargs):
+    def read_from_stream(cls,strm: BufferedIOBase,  wfdhdr: RigolBinaryWaveformDataHeader, **kwargs):
         rawdat: bytes = strm.read(wfdhdr.bufsz)
         return RigolBinaryWaveformData(rawdat, **(kwargs | {"wfdhdr" : wfdhdr}))
 
@@ -99,8 +103,6 @@ class RigolBinaryWaveformData:
             case _:
                 raise ValueError("can't interpret bpp field in data!")
         self._pylist = None
-        self._xorigin = xorigin
-        self._xincr = xincr
 
     @property
     def xiter(self) -> Generator[float]:
@@ -145,7 +147,6 @@ class RigolBinaryWaveformData:
         self._pylist = out
         return out
 
-
 HeaderT = TypeVar("HeaderT", bound=RigolBinaryHeader, covariant=True)
 
 def _read_header(f: BufferedIOBase, T: Type[HeaderT]) -> HeaderT:
@@ -160,18 +161,19 @@ def _read_header(f: BufferedIOBase, T: Type[HeaderT]) -> HeaderT:
     return T.from_packed(packed_data)
 
 
-def read_rigol_bin(floc: str | Path):
+def read_rigol_bin(floc: str | Path) -> list[RigolBinaryWaveformData]:
     with open(floc, "rb") as f:
         fhdr = _read_header(f, RigolBinaryFileHeader)
         waveforms = []
         for i in range(fhdr.nwfms):
             wvhdr = _read_header(f, RigolBinaryWaveformHeader)
             wvdathdr = _read_header(f, RigolBinaryWaveformDataHeader)
-            wvdat = RigolBinaryWaveformData.read_from_stream(f, wvdathdr, wvhdr)
-            waveforms.append((wvhdr, wvdathdr, wvdat))
+            wvdat = RigolBinaryWaveformData.read_from_stream(f, wvdathdr, wfhdr=wvhdr,
+                                                             fhdr=fhdr)
+            waveforms.append(wvdat)
 
-    return fhdr, waveforms
+    return waveforms
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
-    fhdr, waveforms = read_rigol_bin("RigolDS20.bin")
+    waveforms = read_rigol_bin("RigolDS20.bin")
